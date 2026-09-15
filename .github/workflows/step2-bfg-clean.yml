@@ -1,0 +1,73 @@
+name: Step 2 BFG history cleanup
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  clean:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Fetch branches and capture leases
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin '+refs/heads/*:refs/remotes/origin/*' --prune
+          echo "OLD_MAIN=$(git rev-parse refs/remotes/origin/main)" >> "$GITHUB_ENV"
+          echo "OLD_DEP=$(git rev-parse refs/remotes/origin/dependabot/github_actions/actions/checkout-7)" >> "$GITHUB_ENV"
+          test ! -f .env
+          test -n "$(git log --all --format='%H' -- .env)"
+
+      - name: Remove temporary workflow from final tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/step2-bfg-clean.yml
+          git commit -m "Remove temporary BFG cleanup workflow"
+
+      - name: Download and verify BFG
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location \
+            --output "$RUNNER_TEMP/bfg-1.14.0.jar" \
+            "https://repo1.maven.org/maven2/com/madgag/bfg/1.14.0/bfg-1.14.0.jar"
+          echo "1a75e9390541f4b55d9c01256b361b815c1e0a263e2fb3d072b55c2911ead0b7  $RUNNER_TEMP/bfg-1.14.0.jar" | sha256sum --check -
+
+      - name: Rewrite .env history
+        shell: bash
+        run: |
+          set -euo pipefail
+          java -jar "$RUNNER_TEMP/bfg-1.14.0.jar" --delete-files .env --no-blob-protection .
+          git reflog expire --expire=now --all
+          git gc --prune=now --aggressive
+          if [ -n "$(git log --stat --all -- .env)" ]; then
+            echo "::error::.env remains in Git history"
+            exit 1
+          fi
+
+      - name: Force-push rewritten branches safely
+        shell: bash
+        run: |
+          set -euo pipefail
+          git push origin \
+            --force-with-lease="main:${OLD_MAIN}" \
+            refs/heads/main:refs/heads/main
+          git push origin \
+            --force-with-lease="dependabot/github_actions/actions/checkout-7:${OLD_DEP}" \
+            refs/remotes/origin/dependabot/github_actions/actions/checkout-7:refs/heads/dependabot/github_actions/actions/checkout-7
